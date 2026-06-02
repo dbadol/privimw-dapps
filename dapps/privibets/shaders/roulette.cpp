@@ -2,12 +2,9 @@
 // American Roulette: 38 outcomes (0-37, where 37 = 00)
 #include "common.h"
 #include "roulette.h"
+#include "roulette_calc.h"
 
 namespace BeamRoulette {
-
-// American Roulette red numbers (18 of 36, excluding 0 and 00)
-static const uint8_t s_RedNumbers[] = {1,3,5,7,9,12,14,16,18,19,21,23,25,27,30,32,34,36};
-static const uint32_t s_RedCount = sizeof(s_RedNumbers) / sizeof(s_RedNumbers[0]);
 
 // Global state (singleton)
 static State g_State;
@@ -45,14 +42,6 @@ uint64_t GetAvailableBalance() {
     return total - reserved;
 }
 
-// Check if a number is red
-bool IsRed(uint8_t n) {
-    for (uint32_t i = 0; i < s_RedCount; i++) {
-        if (s_RedNumbers[i] == n) return true;
-    }
-    return false;
-}
-
 // Calculate shared spin result from stored placement hash + reveal height + spin ID.
 // Returns 0-37 (37 = 00). Same formula in contract and app shader (no get_HdrInfo needed).
 // Security: placementHash is the block hash at placement time — unknowable when
@@ -68,30 +57,6 @@ uint8_t CalculateSpinResult(const HashValue& placementHash, Height revealAt, uin
 
     uint16_t rawValue = (static_cast<uint16_t>(resultHash.m_p[0]) << 8) | resultHash.m_p[1];
     return rawValue % 38;  // 0-37 (37 = 00)
-}
-
-// Determine if a bet position won given the spin result
-bool IsBetWon(uint8_t betType, uint8_t betNumber, uint8_t result) {
-    // 0 and 00 (37): only Straight bets on that exact number win
-    if (result == 0 || result == 37)
-        return (betType == BetType::Straight && betNumber == result);
-
-    switch (betType) {
-        case BetType::Straight: return (result == betNumber);
-        case BetType::Red:     return IsRed(result);
-        case BetType::Black:   return (!IsRed(result));
-        case BetType::Odd:     return (result % 2 == 1);
-        case BetType::Even:    return (result % 2 == 0);
-        case BetType::Low:     return (result >= 1 && result <= 18);
-        case BetType::High:    return (result >= 19 && result <= 36);
-        case BetType::Dozen1:  return (result >= 1 && result <= 12);
-        case BetType::Dozen2:  return (result >= 13 && result <= 24);
-        case BetType::Dozen3:  return (result >= 25 && result <= 36);
-        case BetType::Column1: return (result % 3 == 1);
-        case BetType::Column2: return (result % 3 == 2);
-        case BetType::Column3: return (result % 3 == 0);
-        default: return false;
-    }
 }
 
 // Get multiplier for a bet type from state
@@ -133,9 +98,14 @@ void ProcessSpinResult(Spin& spin, uint8_t result, State& s) {
         }
     }
 
+    // Reserved max must cover any single-wheel outcome total (solvency invariant)
+    if (spin.m_TotalPayout > spin.m_MaxPayout) Env::Halt();
+
     if (anyWon) {
         spin.m_Status = SpinStatus::Won;
-        s.m_PendingPayouts += spin.m_TotalPayout;
+        uint64_t newPending = 0;
+        if (!CheckedAdd(s.m_PendingPayouts, spin.m_TotalPayout, newPending)) Env::Halt();
+        s.m_PendingPayouts = newPending;
     } else {
         spin.m_Status = SpinStatus::Lost;
     }
@@ -280,7 +250,10 @@ BEAM_EXPORT void Method_2(const BeamRoulette::Method::PlaceBets& r)
     _POD_(spin.m_PlacementHash) = hdr.m_Hash;
 
     uint64_t totalWagered = 0;
-    uint64_t totalMaxPayout = 0;
+    uint8_t legTypes[10];
+    uint8_t legNumbers[10];
+    uint64_t legAmounts[10];
+    uint64_t legMults[10];
 
     // Validate and populate each bet position
     for (uint8_t i = 0; i < r.m_NumBets; i++) {
@@ -306,8 +279,6 @@ BEAM_EXPORT void Method_2(const BeamRoulette::Method::PlaceBets& r)
         // Overflow check: amount * mult must not overflow
         if (amount > static_cast<uint64_t>(-1) / mult) Env::Halt();
 
-        uint64_t maxPayout = (amount * mult) / 100;
-
         // Populate bet position
         BeamRoulette::BetPosition& bp = spin.m_Bets[i];
         bp.m_Type = betType;
@@ -317,22 +288,37 @@ BEAM_EXPORT void Method_2(const BeamRoulette::Method::PlaceBets& r)
         bp.m_Payout = 0;
         bp.m_Won = 0;
 
-        totalWagered += amount;
-        totalMaxPayout += maxPayout;
+        legTypes[i] = betType;
+        legNumbers[i] = betNumber;
+        legAmounts[i] = amount;
+        legMults[i] = mult;
+
+        if (!BeamRoulette::CheckedAdd(totalWagered, amount, totalWagered)) Env::Halt();
     }
 
-    // Solvency check: pool must cover worst-case payout
-    if (BeamRoulette::GetAvailableBalance() < totalMaxPayout) Env::Halt();
+    BeamRoulette::SpinExposure exposure;
+    if (!BeamRoulette::ComputeSpinExposure(r.m_NumBets, legTypes, legNumbers, legAmounts, legMults, exposure))
+        Env::Halt();
+
+    // Solvency check: pool must cover true worst-case payout for this spin
+    if (BeamRoulette::GetAvailableBalance() < exposure.m_MaxPayout) Env::Halt();
 
     // Lock user's total wager into the contract
     Env::FundsLock(r.m_AssetId, totalWagered);
 
     // Update state accounting
     spin.m_TotalWagered = totalWagered;
-    spin.m_MaxPayout = totalMaxPayout;
-    s.m_TotalBets += totalWagered;
-    s.m_PendingBets += totalWagered;
-    s.m_PendingMaxPayout += totalMaxPayout;
+    spin.m_MaxPayout = exposure.m_MaxPayout;
+
+    uint64_t newTotalBets = 0;
+    uint64_t newPendingBets = 0;
+    uint64_t newPendingMax = 0;
+    if (!BeamRoulette::CheckedAdd(s.m_TotalBets, totalWagered, newTotalBets)) Env::Halt();
+    if (!BeamRoulette::CheckedAdd(s.m_PendingBets, totalWagered, newPendingBets)) Env::Halt();
+    if (!BeamRoulette::CheckedAdd(s.m_PendingMaxPayout, exposure.m_MaxPayout, newPendingMax)) Env::Halt();
+    s.m_TotalBets = newTotalBets;
+    s.m_PendingBets = newPendingBets;
+    s.m_PendingMaxPayout = newPendingMax;
 
     // Save spin
     BeamRoulette::SpinKey sk;

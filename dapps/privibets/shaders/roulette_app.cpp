@@ -3,6 +3,7 @@
 #include "common.h"
 #include "app_common_impl.h"
 #include "roulette.h"
+#include "roulette_calc.h"
 
 void OnError(const char* sz)
 {
@@ -36,17 +37,6 @@ struct UserKey {
     }
 };
 
-// Red numbers lookup (duplicated from contract for client-side preview)
-static const uint8_t s_RedNumbers[] = {1,3,5,7,9,12,14,16,18,19,21,23,25,27,30,32,34,36};
-static const uint32_t s_RedCount = sizeof(s_RedNumbers) / sizeof(s_RedNumbers[0]);
-
-static bool IsRed(uint8_t n) {
-    for (uint32_t i = 0; i < s_RedCount; i++) {
-        if (s_RedNumbers[i] == n) return true;
-    }
-    return false;
-}
-
 // Client-side spin result calculation (same formula as contract — no get_HdrInfo)
 // Uses stored placement hash from Spin struct + reveal height + spin ID
 static uint8_t CalculateSpinResult(const HashValue& placementHash, Height revealAt, uint64_t spinId) {
@@ -62,27 +52,34 @@ static uint8_t CalculateSpinResult(const HashValue& placementHash, Height reveal
     return rawValue % 38;
 }
 
-// Client-side win check (same logic as contract)
-static bool IsBetWon(uint8_t betType, uint8_t betNumber, uint8_t result) {
-    if (result == 0 || result == 37)
-        return (betType == BeamRoulette::BetType::Straight && betNumber == result);
-
+static uint64_t GetMultiplierForType(const BeamRoulette::State& s, uint8_t betType) {
     switch (betType) {
-        case BeamRoulette::BetType::Straight: return (result == betNumber);
-        case BeamRoulette::BetType::Red:     return IsRed(result);
-        case BeamRoulette::BetType::Black:   return (!IsRed(result));
-        case BeamRoulette::BetType::Odd:     return (result % 2 == 1);
-        case BeamRoulette::BetType::Even:    return (result % 2 == 0);
-        case BeamRoulette::BetType::Low:     return (result >= 1 && result <= 18);
-        case BeamRoulette::BetType::High:    return (result >= 19 && result <= 36);
-        case BeamRoulette::BetType::Dozen1:  return (result >= 1 && result <= 12);
-        case BeamRoulette::BetType::Dozen2:  return (result >= 13 && result <= 24);
-        case BeamRoulette::BetType::Dozen3:  return (result >= 25 && result <= 36);
-        case BeamRoulette::BetType::Column1: return (result % 3 == 1);
-        case BeamRoulette::BetType::Column2: return (result % 3 == 2);
-        case BeamRoulette::BetType::Column3: return (result % 3 == 0);
-        default: return false;
+        case BeamRoulette::BetType::Straight: return s.m_StraightMult;
+        case BeamRoulette::BetType::Red:
+        case BeamRoulette::BetType::Black:
+        case BeamRoulette::BetType::Odd:
+        case BeamRoulette::BetType::Even:
+        case BeamRoulette::BetType::Low:
+        case BeamRoulette::BetType::High:    return s.m_EvenMoneyMult;
+        case BeamRoulette::BetType::Dozen1:
+        case BeamRoulette::BetType::Dozen2:
+        case BeamRoulette::BetType::Dozen3:
+        case BeamRoulette::BetType::Column1:
+        case BeamRoulette::BetType::Column2:
+        case BeamRoulette::BetType::Column3: return s.m_DozenColMult;
+        default: return 0;
     }
+}
+
+static uint64_t MirrorAvailableBalance(const BeamRoulette::State& s) {
+    uint64_t total = s.m_TotalDeposited + s.m_TotalBets;
+    if (s.m_TotalPayouts > total) return 0;
+    total -= s.m_TotalPayouts;
+    if (s.m_TotalWithdrawn > total) return 0;
+    total -= s.m_TotalWithdrawn;
+    uint64_t reserved = s.m_PendingMaxPayout + s.m_PendingPayouts;
+    if (reserved > total) return 0;
+    return total - reserved;
 }
 
 // Simple string helpers for kernel descriptions
@@ -213,6 +210,14 @@ BEAM_EXPORT void Method_0()
                 Env::DocAddText("types", "string");      // comma-separated: "1,0,7"
                 Env::DocAddText("numbers", "string");     // comma-separated: "0,17,0"
                 Env::DocAddText("amounts", "string");     // comma-separated: "100000000,200000000,500000000"
+            }
+            {
+                Env::DocGroup grMethod("preview_place_bets");
+                Env::DocAddText("cid", "ContractID");
+                Env::DocAddText("num_bets", "uint32");
+                Env::DocAddText("types", "string");
+                Env::DocAddText("numbers", "string");
+                Env::DocAddText("amounts", "string");
             }
             {
                 Env::DocGroup grMethod("check_results");
@@ -447,6 +452,104 @@ void On_place_bets(const ContractID& cid)
     Env::GenerateKernel(&cid, BeamRoulette::Method::PlaceBets::s_iMethod, &args, sizeof(args), &fc, 1, nullptr, 0, "Roulette: place bets", nCharge);
 }
 
+// Preflight: exact max exposure + per-pocket payout grid (same math as contract placement)
+void On_preview_place_bets(const ContractID& cid)
+{
+    Env::Key_T<BeamRoulette::StateKey> sk;
+    sk.m_Prefix.m_Cid = cid;
+
+    BeamRoulette::State s;
+    if (!Env::VarReader::Read_T(sk, s))
+    {
+        OnError("Failed to read contract state");
+        return;
+    }
+
+    uint32_t numBets = 0;
+    Env::DocGet("num_bets", numBets);
+    if (numBets < 1 || numBets > BeamRoulette::s_MaxBetsPerSpin) {
+        OnError("num_bets must be 1-10");
+        return;
+    }
+
+    char typesStr[64] = {0};
+    char numbersStr[64] = {0};
+    char amountsStr[256] = {0};
+    Env::DocGetText("types", typesStr, sizeof(typesStr));
+    Env::DocGetText("numbers", numbersStr, sizeof(numbersStr));
+    Env::DocGetText("amounts", amountsStr, sizeof(amountsStr));
+
+    uint8_t legTypes[10];
+    uint8_t legNumbers[10];
+    uint64_t legAmounts[10];
+    uint64_t legMults[10];
+    uint32_t nTypes = ParseSSV_u8(typesStr, legTypes, 10);
+    uint32_t nNumbers = ParseSSV_u8(numbersStr, legNumbers, 10);
+    uint32_t nAmounts = ParseSSV_u64(amountsStr, legAmounts, 10);
+
+    if (nTypes < numBets || nNumbers < numBets || nAmounts < numBets) {
+        OnError("Array size mismatch");
+        return;
+    }
+
+    uint64_t totalWagered = 0;
+    uint64_t summedLegMax = 0;
+    for (uint32_t i = 0; i < numBets; i++) {
+        uint8_t betType = legTypes[i];
+        if (betType > 12) {
+            OnError("Invalid bet type");
+            return;
+        }
+        if (betType == BeamRoulette::BetType::Straight && legNumbers[i] > 37) {
+            OnError("Invalid straight number");
+            return;
+        }
+        if (legAmounts[i] < s.m_MinBet || legAmounts[i] > s.m_MaxBet) {
+            OnError("Bet amount out of limits");
+            return;
+        }
+        uint64_t mult = GetMultiplierForType(s, betType);
+        if (mult == 0) {
+            OnError("Invalid multiplier");
+            return;
+        }
+        legMults[i] = mult;
+        if (!BeamRoulette::CheckedAdd(totalWagered, legAmounts[i], totalWagered)) {
+            OnError("Wager overflow");
+            return;
+        }
+    }
+
+    if (!BeamRoulette::ComputeSummedLegMaxPayout((uint8_t)numBets, legAmounts, legMults, summedLegMax)) {
+        OnError("Payout overflow");
+        return;
+    }
+
+    BeamRoulette::SpinExposure exposure;
+    if (!BeamRoulette::ComputeSpinExposure((uint8_t)numBets, legTypes, legNumbers, legAmounts, legMults, exposure)) {
+        OnError("Exposure overflow");
+        return;
+    }
+
+    uint64_t available = MirrorAvailableBalance(s);
+
+    Env::DocGroup gr("preview");
+    Env::DocAddNum("total_wagered", totalWagered);
+    Env::DocAddNum("max_payout", exposure.m_MaxPayout);
+    Env::DocAddNum("summed_leg_max_payout", summedLegMax);
+    Env::DocAddNum("available_balance", available);
+    Env::DocAddNum("solvency_ok", (uint32_t)(available >= exposure.m_MaxPayout ? 1 : 0));
+
+    {
+        Env::DocArray arr("payout_by_result");
+        for (uint32_t r = 0; r < BeamRoulette::s_WheelOutcomes; r++) {
+            Env::DocGroup pocket("");
+            Env::DocAddNum("result", r);
+            Env::DocAddNum("payout", exposure.m_PayoutByResult[r]);
+        }
+    }
+}
+
 // Claim all claimable spins by generating one CheckSingleSpin kernel per spin.
 // BVM cost is O(claims), not O(total contract size), because each kernel loads one spin by ID.
 void On_check_results(const ContractID& cid)
@@ -512,7 +615,7 @@ void On_check_results(const ContractID& cid)
                 uint8_t result = CalculateSpinResult(spin.m_PlacementHash, spin.m_RevealAt, spin.m_SpinId);
                 for (uint8_t i = 0; i < spin.m_NumBets; i++) {
                     const BeamRoulette::BetPosition& bp = spin.m_Bets[i];
-                    if (IsBetWon(bp.m_Type, bp.m_Number, result)) {
+                    if (BeamRoulette::IsBetWon(bp.m_Type, bp.m_Number, result)) {
                         payout += (bp.m_Amount * bp.m_Multiplier) / 100;
                     }
                 }
@@ -616,7 +719,7 @@ void On_check_single(const ContractID& cid)
         uint8_t result = CalculateSpinResult(spin.m_PlacementHash, spin.m_RevealAt, spin.m_SpinId);
         for (uint8_t i = 0; i < spin.m_NumBets; i++) {
             const BeamRoulette::BetPosition& bp = spin.m_Bets[i];
-            if (IsBetWon(bp.m_Type, bp.m_Number, result)) {
+            if (BeamRoulette::IsBetWon(bp.m_Type, bp.m_Number, result)) {
                 payout += (bp.m_Amount * bp.m_Multiplier) / 100;
             }
         }
@@ -723,7 +826,7 @@ void On_my_spins(const ContractID& cid)
                     Env::DocArray prevArr("preview_bets");
                     for (uint8_t i = 0; i < spin.m_NumBets; i++) {
                         const BeamRoulette::BetPosition& bp = spin.m_Bets[i];
-                        bool won = IsBetWon(bp.m_Type, bp.m_Number, result);
+                        bool won = BeamRoulette::IsBetWon(bp.m_Type, bp.m_Number, result);
                         uint64_t payout = won ? (bp.m_Amount * bp.m_Multiplier) / 100 : 0;
                         if (won) { previewPayout += payout; winsCount++; }
 
@@ -858,7 +961,7 @@ void On_view_all(const ContractID& cid)
                             Env::DocArray prevArr("preview_bets");
                             for (uint8_t i = 0; i < spin.m_NumBets; i++) {
                                 const BeamRoulette::BetPosition& bp = spin.m_Bets[i];
-                                bool won = IsBetWon(bp.m_Type, bp.m_Number, result);
+                                bool won = BeamRoulette::IsBetWon(bp.m_Type, bp.m_Number, result);
                                 uint64_t payout = won ? (bp.m_Amount * bp.m_Multiplier) / 100 : 0;
                                 if (won) { previewPayout += payout; winsCount++; }
 
@@ -1274,6 +1377,8 @@ BEAM_EXPORT void Method_1()
             return On_view_user_pk(cid);
         if (!Env::Strcmp(szAction, "place_bets"))
             return On_place_bets(cid);
+        if (!Env::Strcmp(szAction, "preview_place_bets"))
+            return On_preview_place_bets(cid);
         if (!Env::Strcmp(szAction, "check_results"))
             return On_check_results(cid);
         if (!Env::Strcmp(szAction, "check_single"))

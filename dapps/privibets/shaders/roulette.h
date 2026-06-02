@@ -5,7 +5,7 @@
 namespace BeamRoulette {
 
 // Shader ID (hash of compiled roulette.wasm) - update after each recompile
-static const ShaderID s_SID = {0x04,0x92,0xcf,0x40,0xb3,0x7b,0x42,0xba,0xa4,0x65,0x33,0xcc,0x8e,0xe3,0xda,0xdb,0x3f,0x7f,0x46,0xc7,0xe0,0xd4,0x3f,0xfa,0x3e,0x48,0xa7,0x81,0x38,0x1e,0x7a,0x5b};
+static const ShaderID s_SID = {0x38,0x6c,0xec,0xb4,0xd2,0x2e,0xda,0x21,0xbf,0x5d,0x08,0x09,0x61,0x8d,0x77,0x81,0x73,0xbc,0xd0,0xe3,0x35,0xfb,0x97,0x15,0x89,0x06,0x26,0x21,0xe4,0x7f,0x55,0x54};
 
 // Multiplier constants (x100 scale)
 static const uint64_t s_DefaultStraightMult = 3600ULL;     // 36x (35:1)
@@ -66,7 +66,7 @@ struct State {
     uint64_t m_TotalBets;           // Total user wagers received (cumulative)
     uint64_t m_TotalPayouts;        // Total payouts made to users (cumulative)
     uint64_t m_PendingBets;         // Sum of locked wagers for pending spins
-    uint64_t m_PendingMaxPayout;    // Sum of worst-case payouts for pending spins (solvency reserve)
+    uint64_t m_PendingMaxPayout;    // Sum of per-spin max payouts (max over 38 wheel outcomes)
     uint64_t m_PendingPayouts;      // Sum of payouts for Won-but-not-yet-Claimed spins
     uint64_t m_NextSpinId;          // Next spin ID to assign
     uint64_t m_FirstUnresolvedSpinId; // Scan optimization: skip resolved spins
@@ -95,7 +95,7 @@ struct Spin {
     uint8_t m_Status;               // SpinStatus enum
     uint64_t m_TotalWagered;        // Sum of all bet amounts
     uint64_t m_TotalPayout;         // Sum of winning payouts (set on reveal)
-    uint64_t m_MaxPayout;           // Worst-case total payout (reserved at placement)
+    uint64_t m_MaxPayout;           // Max total payout over wheel outcomes (reserved at placement)
     uint64_t m_CreatedHeight;       // Block height when spin was placed
     Height m_RevealAt;              // Block height when result is determined
     BetPosition m_Bets[10];         // Fixed array; unused slots zero-initialized
