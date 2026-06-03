@@ -121,9 +121,9 @@ static void U64ToStr(uint64_t val, char* buf, uint32_t maxLen) {
 struct SpinHistSlot {
     uint64_t spinId, totalWagered, totalPayout, createdHeight;
     uint32_t numBets, result, status;
-    uint8_t betTypes[10];   // BetType per position (for UI display)
-    uint8_t betNumbers[10]; // Straight number per position
-    uint8_t betWon[10];     // Won flag per position
+    uint8_t betTypes[BeamRoulette::s_MaxBetsPerSpin];
+    uint8_t betNumbers[BeamRoulette::s_MaxBetsPerSpin];
+    uint8_t betWon[BeamRoulette::s_MaxBetsPerSpin];
 };
 
 // Compact unclaimed spin entry
@@ -406,26 +406,26 @@ void On_place_bets(const ContractID& cid)
 
     uint32_t numBets = 0;
     Env::DocGet("num_bets", numBets);
-    if (numBets < 1 || numBets > 10) {
-        OnError("num_bets must be 1-10");
+    if (numBets < 1 || numBets > BeamRoulette::s_MaxBetsPerSpin) {
+        OnError("num_bets out of range");
         return;
     }
     args.m_NumBets = (uint8_t)numBets;
 
     // Parse comma-separated arrays
-    char typesStr[64] = {0};
-    char numbersStr[64] = {0};
-    char amountsStr[256] = {0};
+    char typesStr[128] = {0};
+    char numbersStr[128] = {0};
+    char amountsStr[512] = {0};
     Env::DocGetText("types", typesStr, sizeof(typesStr));
     Env::DocGetText("numbers", numbersStr, sizeof(numbersStr));
     Env::DocGetText("amounts", amountsStr, sizeof(amountsStr));
 
-    uint8_t parsedTypes[10];
-    uint8_t parsedNumbers[10];
-    uint64_t parsedAmounts[10];
-    uint32_t nTypes = ParseSSV_u8(typesStr, parsedTypes, 10);
-    uint32_t nNumbers = ParseSSV_u8(numbersStr, parsedNumbers, 10);
-    uint32_t nAmounts = ParseSSV_u64(amountsStr, parsedAmounts, 10);
+    uint8_t parsedTypes[BeamRoulette::s_MaxBetsPerSpin];
+    uint8_t parsedNumbers[BeamRoulette::s_MaxBetsPerSpin];
+    uint64_t parsedAmounts[BeamRoulette::s_MaxBetsPerSpin];
+    uint32_t nTypes = ParseSSV_u8(typesStr, parsedTypes, BeamRoulette::s_MaxBetsPerSpin);
+    uint32_t nNumbers = ParseSSV_u8(numbersStr, parsedNumbers, BeamRoulette::s_MaxBetsPerSpin);
+    uint32_t nAmounts = ParseSSV_u64(amountsStr, parsedAmounts, BeamRoulette::s_MaxBetsPerSpin);
 
     if (nTypes < numBets || nNumbers < numBets || nAmounts < numBets) {
         OnError("Array size mismatch");
@@ -468,24 +468,24 @@ void On_preview_place_bets(const ContractID& cid)
     uint32_t numBets = 0;
     Env::DocGet("num_bets", numBets);
     if (numBets < 1 || numBets > BeamRoulette::s_MaxBetsPerSpin) {
-        OnError("num_bets must be 1-10");
+        OnError("num_bets out of range");
         return;
     }
 
-    char typesStr[64] = {0};
-    char numbersStr[64] = {0};
-    char amountsStr[256] = {0};
+    char typesStr[128] = {0};
+    char numbersStr[128] = {0};
+    char amountsStr[512] = {0};
     Env::DocGetText("types", typesStr, sizeof(typesStr));
     Env::DocGetText("numbers", numbersStr, sizeof(numbersStr));
     Env::DocGetText("amounts", amountsStr, sizeof(amountsStr));
 
-    uint8_t legTypes[10];
-    uint8_t legNumbers[10];
-    uint64_t legAmounts[10];
-    uint64_t legMults[10];
-    uint32_t nTypes = ParseSSV_u8(typesStr, legTypes, 10);
-    uint32_t nNumbers = ParseSSV_u8(numbersStr, legNumbers, 10);
-    uint32_t nAmounts = ParseSSV_u64(amountsStr, legAmounts, 10);
+    uint8_t legTypes[BeamRoulette::s_MaxBetsPerSpin];
+    uint8_t legNumbers[BeamRoulette::s_MaxBetsPerSpin];
+    uint64_t legAmounts[BeamRoulette::s_MaxBetsPerSpin];
+    uint64_t legMults[BeamRoulette::s_MaxBetsPerSpin];
+    uint32_t nTypes = ParseSSV_u8(typesStr, legTypes, BeamRoulette::s_MaxBetsPerSpin);
+    uint32_t nNumbers = ParseSSV_u8(numbersStr, legNumbers, BeamRoulette::s_MaxBetsPerSpin);
+    uint32_t nAmounts = ParseSSV_u64(amountsStr, legAmounts, BeamRoulette::s_MaxBetsPerSpin);
 
     if (nTypes < numBets || nNumbers < numBets || nAmounts < numBets) {
         OnError("Array size mismatch");
@@ -992,7 +992,7 @@ void On_view_all(const ContractID& cid)
                     h.result = (uint32_t)spin.m_Result;
                     h.status = (uint32_t)spin.m_Status;
                     // Copy per-bet details for history display
-                    for (uint8_t bi = 0; bi < 10; bi++) {
+                    for (uint8_t bi = 0; bi < BeamRoulette::s_MaxBetsPerSpin; bi++) {
                         if (bi < spin.m_NumBets) {
                             h.betTypes[bi] = spin.m_Bets[bi].m_Type;
                             h.betNumbers[bi] = spin.m_Bets[bi].m_Number;

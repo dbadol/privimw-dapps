@@ -217,7 +217,7 @@ BEAM_EXPORT void Dtor(void*)
 }
 
 // ============================================================================
-// Method 2: Place Bets (Anyone can call — up to 10 bet positions per spin)
+// Method 2: Place Bets (Anyone can call — up to s_MaxBetsPerSpin bet positions per spin)
 // ============================================================================
 BEAM_EXPORT void Method_2(const BeamRoulette::Method::PlaceBets& r)
 {
@@ -250,10 +250,10 @@ BEAM_EXPORT void Method_2(const BeamRoulette::Method::PlaceBets& r)
     _POD_(spin.m_PlacementHash) = hdr.m_Hash;
 
     uint64_t totalWagered = 0;
-    uint8_t legTypes[10];
-    uint8_t legNumbers[10];
-    uint64_t legAmounts[10];
-    uint64_t legMults[10];
+    uint8_t legTypes[BeamRoulette::s_MaxBetsPerSpin];
+    uint8_t legNumbers[BeamRoulette::s_MaxBetsPerSpin];
+    uint64_t legAmounts[BeamRoulette::s_MaxBetsPerSpin];
+    uint64_t legMults[BeamRoulette::s_MaxBetsPerSpin];
 
     // Validate and populate each bet position
     for (uint8_t i = 0; i < r.m_NumBets; i++) {

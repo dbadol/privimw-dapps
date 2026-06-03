@@ -5,7 +5,7 @@
 namespace BeamRoulette {
 
 // Shader ID (hash of compiled roulette.wasm) - update after each recompile
-static const ShaderID s_SID = {0x38,0x6c,0xec,0xb4,0xd2,0x2e,0xda,0x21,0xbf,0x5d,0x08,0x09,0x61,0x8d,0x77,0x81,0x73,0xbc,0xd0,0xe3,0x35,0xfb,0x97,0x15,0x89,0x06,0x26,0x21,0xe4,0x7f,0x55,0x54};
+static const ShaderID s_SID = {0xe3,0x0c,0xf7,0x20,0x28,0x7f,0x02,0xe4,0xf4,0x6b,0x70,0x94,0xc1,0x46,0x22,0xe4,0x29,0x77,0x86,0x1c,0x5c,0xe9,0x4d,0x17,0x66,0x66,0xeb,0x55,0x01,0x97,0x58,0x9b};
 
 // Multiplier constants (x100 scale)
 static const uint64_t s_DefaultStraightMult = 3600ULL;     // 36x (35:1)
@@ -21,7 +21,7 @@ static const uint64_t s_RevealEpoch = 3ULL;                // 3 blocks minimum w
 static const uint64_t s_MinRevealEpoch = 2ULL;             // Security floor: never less than 2
 
 // Multi-bet limits
-static const uint32_t s_MaxBetsPerSpin = 10;               // Max bet positions per TX
+static const uint32_t s_MaxBetsPerSpin = 20;              // Max bet positions per TX
 
 // Bet types (13 standard American Roulette bets)
 struct BetType {
@@ -85,12 +85,12 @@ struct BetPosition {
     uint8_t m_Won;                  // 0 or 1 (set on reveal)
 };
 
-// Spin record — one per transaction, contains up to 10 bet positions
+// Spin record — one per transaction, contains up to s_MaxBetsPerSpin bet positions
 struct Spin {
     uint64_t m_SpinId;
     PubKey m_UserPk;                // User's public key
     HashValue m_PlacementHash;      // Block hash at placement — entropy for result
-    uint8_t m_NumBets;              // 1-10 active bet positions
+    uint8_t m_NumBets;              // 1-s_MaxBetsPerSpin active bet positions
     uint8_t m_Result;               // 0-37 (37=00), set on reveal
     uint8_t m_Status;               // SpinStatus enum
     uint64_t m_TotalWagered;        // Sum of all bet amounts
@@ -98,7 +98,7 @@ struct Spin {
     uint64_t m_MaxPayout;           // Max total payout over wheel outcomes (reserved at placement)
     uint64_t m_CreatedHeight;       // Block height when spin was placed
     Height m_RevealAt;              // Block height when result is determined
-    BetPosition m_Bets[10];         // Fixed array; unused slots zero-initialized
+    BetPosition m_Bets[s_MaxBetsPerSpin];  // Fixed array; unused slots zero-initialized
 };
 
 // Constructor parameters
@@ -109,16 +109,16 @@ struct Params {
 // Method parameter structures
 namespace Method {
 
-// Place 1-10 bet positions in one spin (user calls)
+// Place 1-s_MaxBetsPerSpin bet positions in one spin (user calls)
 struct PlaceBets {
     static const uint32_t s_iMethod = 2;
     PubKey m_UserPk;                // User's public key (derived from CID in app shader)
     AssetID m_AssetId;
-    uint8_t m_NumBets;              // 1-10
+    uint8_t m_NumBets;              // 1-s_MaxBetsPerSpin
     // Parallel arrays (BVM-friendly flat layout):
-    uint8_t m_Types[10];            // BetType enum per position
-    uint8_t m_Numbers[10];          // Straight number per position (0-37)
-    uint64_t m_Amounts[10];         // Wager per position (in groth)
+    uint8_t m_Types[s_MaxBetsPerSpin];    // BetType enum per position
+    uint8_t m_Numbers[s_MaxBetsPerSpin];  // Straight number per position (0-37)
+    uint64_t m_Amounts[s_MaxBetsPerSpin]; // Wager per position (in groth)
 };
 
 // Check and claim all user's pending/won spins (user calls)
